@@ -206,8 +206,8 @@ def weighted_landmark_loss(predicted_landmarks, landmarks_gt, weight=1.):
     weights[31] = 3
     weights[35] = 3
     # inner mouth
-    weights[60:68] = 1.5
-    weights[48:60] = 1.5
+    weights[60:68] = 5.0  # 1.5
+    weights[48:60] = 5.0  # 1.5
     weights[48] = 3
     weights[54] = 3
 
