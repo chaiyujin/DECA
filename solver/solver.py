@@ -47,6 +47,7 @@ cfg.dataset.image_size = A
 # cfg.loss.useWlmk = False
 cfg.model.flame_model_path = os.path.join(cfg.deca_dir, 'data', 'generic_model.pkl') 
 cfg.model.param_list = ['shape', 'tex', 'exp', 'pose', 'cam', 'transl', 'light']
+cfg.model.shared_param_list = ['shape', 'tex', 'light']
 cfg.model.n_shape = 300
 cfg.model.n_tex = 50
 cfg.model.n_exp = 100
@@ -141,7 +142,7 @@ class DECADecoder(nn.Module):
         codedict = {}
         for key in ['shape', 'tex', 'exp', 'pose', 'cam', 'transl', 'light']:
             n = self.cfg.model.get("n_" + key)
-            if key in ['shape', 'tex', 'cam', 'light']:
+            if key in self.cfg.model.shared_param_list:
                 p = torch.zeros((1, n), device=self.device, dtype=torch.float32)
             else:
                 p = torch.zeros((bsz, n), device=self.device, dtype=torch.float32)
@@ -187,8 +188,10 @@ class DECADecoder(nn.Module):
         if self.cfg.model.use_tex:
             if 'static_albedo' in codedict:
                 albedo = codedict['static_albedo']
+                lights = None
             else:
                 albedo = self.flametex(codedict["tex"])
+                lights = codedict["light"]
         else:
             albedo = torch.zeros([batch_size, 3, self.uv_size, self.uv_size], device=images.device)
         landmarks3d_world = landmarks3d.clone()
@@ -224,7 +227,7 @@ class DECADecoder(nn.Module):
 
         # rendering
         if rendering:
-            ops = self.render(verts, trans_verts, albedo, codedict["light"])
+            ops = self.render(verts, trans_verts, albedo, lights)
             # output
             opdict["grid"] = ops["grid"]
             opdict["rendered_images"] = ops["images"]
@@ -329,6 +332,7 @@ class DECADecoder(nn.Module):
         if self.cfg.loss.photo > 0.:
             # mask
             mask_face_eye = F.grid_sample(self.uv_face_eye_mask.expand(bsz,-1,-1,-1), opdict['grid'].detach(), align_corners=False) 
+            mask_face_eye = (mask_face_eye > 0.5).float()
             # images
             predicted_images = opdict['rendered_images']*mask_face_eye*opdict['alpha_images']
             opdict['mask_face_eye'] = mask_face_eye
@@ -417,7 +421,7 @@ landmark = torch.tensor(lmk_list, device=decoder.device)
 mask = torch.tensor(mask_list, device=decoder.device)
 
 
-def optimize(param_dict, optim, n_iters):
+def optimize(param_dict, optim, n_iters, use_mask):
     codedict = {k: v for k, v in param_dict.items()}
     for k in codedict:
         if codedict[k].shape[0] == 1:
@@ -426,12 +430,12 @@ def optimize(param_dict, optim, n_iters):
     for i_iter in tqdm(range(n_iters)):
         batch = dict()
         batch['image'] = image
-        batch['mask'] = mask
+        batch['mask'] = mask if use_mask else None
         batch['landmark'] = torch.nn.functional.pad(landmark, (0, 1), "constant", 1.0)
 
         # for k, v in codedict.items():
         #     print(k, v.shape, torch.any(v.isnan()), v.abs().min(), v.abs().max())
-        print('cam', codedict['cam'].detach().cpu().numpy()[:, 0])
+        # print('cam', codedict['cam'].detach().cpu().numpy()[:, 0])
         codedict['images'] = batch['image']
         codedict['lmk'] = batch['landmark']
         opdict, visdict = decoder.decode(codedict)
@@ -447,7 +451,7 @@ def optimize(param_dict, optim, n_iters):
             group['lr'] = lr * factor
 
         # vis
-        visdict['predicted_images'] = opdict['predicted_images'] * batch['mask'][:, None, :, :]
+        visdict['predicted_images'] = opdict['predicted_images']  # * batch['mask'][:, None, :, :]
         if 'overlay' in opdict:
             visdict['overlay'] = opdict['overlay']
         if 'albedo' in opdict:
@@ -456,19 +460,58 @@ def optimize(param_dict, optim, n_iters):
         cv2.imshow('canvas', cv2.resize(canvas, None, fx=0.75, fy=0.75))
         cv2.waitKey(1)
 
-    cv2.imwrite("TestSamples/obama/results/canvas.png", canvas)
-    for i in range(bsz):
-        decoder.save_obj(f"TestSamples/obama/results/image_{i:02d}/recons.obj", opdict, i=i)
+        # # inpaint static_albedo
+        # if 'static_albedo' in codedict:
+        #     img = (codedict['static_albedo'][0].permute(1, 2, 0).detach().cpu().numpy() * 255)
+        #     img = np.clip(img, 0, 255)
+        #     img = img[..., [2, 1, 0]].astype(np.uint8)
+        #     face_eye_mask = decoder.uv_face_eye_mask.detach().cpu().numpy()[0, 0]
+        #     face_eye_mask = cv2.resize(face_eye_mask, (img.shape[1], img.shape[0]))
+        #     inp_mask = np.all(img[:, :, :] < 10, axis=-1).astype(np.uint8) * (face_eye_mask > 0.95).astype(np.uint8) * 255
+        #     # inp_mask = (face_eye_mask > 0.95).astype(np.uint8) * 255
+        #     img_inpaint = cv2.inpaint(img, inp_mask, 20, cv2.INPAINT_NS)
+        #     cv2.imshow('albedo', np.concatenate((img, np.repeat(inp_mask[..., None], 3, -1), img_inpaint), axis=1))
+        #     cv2.waitKey(1)
 
-    return opdict
+    return opdict, canvas
 
 
 decoder.cfg.loss.id = 0
 
 codedict = decoder.init_parameters(bsz)
 optim = torch.optim.Adam([v for k, v in codedict.items()], lr=lr)
-opdict = optimize(codedict, optim, 500)
+opdict, canvas = optimize(codedict, optim, 500, True)
 
 codedict['static_albedo'] = torch.nn.Parameter(opdict['albedo'][:1].detach().clone())
+raw = opdict['albedo'][0].permute(1, 2, 0).detach().cpu().numpy()
+raw = cv2.resize(raw, (128, 128))
+codedict['static_albedo'] = torch.nn.Parameter(torch.tensor(raw, device=decoder.device).permute(2, 0, 1).unsqueeze(0))
 optim = torch.optim.Adam([codedict['static_albedo'], codedict['light']], lr=lr)
-optimize(codedict, optim, 500)
+opdict, canvas = optimize(codedict, optim, 500, False)
+
+export_dir = "TestSamples/obama/results"
+cv2.imwrite(f"{export_dir}/results.png", canvas)
+for i in range(bsz):
+    decoder.save_obj(f"{export_dir}/image_{i:02d}/recons.obj", opdict, i=i)
+
+# export
+# static texture
+albedo = codedict['static_albedo'][0].permute(1, 2, 0).detach().cpu().numpy()[..., [2, 1, 0]]
+albedo = np.clip(albedo, 0, 1) * 255
+cv2.imwrite(f"{export_dir}/albedo.png", albedo)
+# shape
+shape = codedict['shape'][0].detach().cpu().numpy().astype(np.float32)
+np.save(f"{export_dir}/shape.npy", shape)
+
+verts, landmarks2d, landmarks3d = decoder.flame(
+    shape_params=codedict["shape"][:1],
+    expression_params=torch.zeros_like(codedict["exp"][:1]),
+    pose_params=torch.zeros_like(codedict["pose"][:1])
+)
+verts = verts[0].detach().cpu().numpy()
+faces = decoder.render.faces[0].detach().cpu().numpy()
+# texture = util.tensor2image(opdict["uv_texture_gt"][i])
+uvcoords = decoder.render.raw_uvcoords[0].detach().cpu().numpy()
+uvfaces = decoder.render.uvfaces[0].detach().cpu().numpy()
+util.write_obj(f"{export_dir}/template_tex.obj", verts, faces, texture=albedo, uvcoords=uvcoords, uvfaces=uvfaces)
+util.write_obj(f"{export_dir}/template.obj", verts, faces, inverse_face_order=True)
