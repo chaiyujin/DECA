@@ -134,7 +134,11 @@ def batch_kp_2d_l1_loss(real_2d_kp, predicted_2d_kp, weights=None):
     kp_pred: N x K x 2
     """
     if weights is not None:
-        real_2d_kp[:,:,2] = weights[None,:]*real_2d_kp[:,:,2]
+        # real_2d_kp[:,:,2] = weights[None,:]*real_2d_kp[:,:,2]
+        real_2d_kp = torch.cat((
+            real_2d_kp[:,:,0:2],
+            real_2d_kp[:,:,2:3] * weights[None,:,None]
+        ), dim=-1)
     kp_gt = real_2d_kp.view(-1, 3)
     kp_pred = predicted_2d_kp.contiguous().view(-1, 2)
     vis = kp_gt[:, 2]
