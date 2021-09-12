@@ -28,7 +28,7 @@ def solve_identity(source_dir, export_dir, cfg, device='cuda:0'):
 
         for i_iter in tqdm(range(n_iters)):
             # decode codes
-            opdict, visdict = decoder.decode(codedict, batch["image"])
+            opdict, visdict = decoder.decode(codedict, batch["image"], batch['landmark'])
             # calculate loss and update outputs
             lossdict, opdict = solver.get_loss(batch, opdict, codedict)
             loss = lossdict['all_loss']

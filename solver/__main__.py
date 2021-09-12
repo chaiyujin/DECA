@@ -19,8 +19,9 @@ torch.backends.cudnn.benchmark = True
 cfg = get_default_config()
 
 # solve identity
-# cfg.train.lr = 1e-2
-# solve_identity('', "TestSamples/obama/results", cfg, "cuda:0")
+cfg.train.lr = 1e-2
+solve_identity('', "TestSamples/obama/results", cfg, "cuda:0")
+quit()
 
 cfg.train.lr = 5e-3
 solve_video(
