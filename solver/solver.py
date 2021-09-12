@@ -65,7 +65,7 @@ class DECADecoder(nn.Module):
         vis68 = (normals68[:, :, 2:] < 0.1).float()
         return vis68
 
-    def decode(self, codedict, images, rendering=True, iddict=None, vis_lmk=True, return_vis=True):
+    def decode(self, codedict, images, lmks_gt, rendering=True, iddict=None, vis_lmk=True, return_vis=True):
         bsz = images.shape[0]
 
         # decode
@@ -125,6 +125,7 @@ class DECADecoder(nn.Module):
         if self.cfg.model.use_tex:
             opdict["albedo"] = albedo
             opdict["uv_face_eye_mask"] = self.uv_face_eye_mask
+            opdict["uv_face_mask"] = self.uv_face_mask
 
         if vis_lmk:
             landmarks3d_vis = self.visofp(ops["transformed_normals"])  # /self.image_size
@@ -146,7 +147,7 @@ class DECADecoder(nn.Module):
         opdict["uv_texture_gt"] = uv_texture_gt
         visdict = {
             "inputs": images,
-            "landmarks2d": util.tensor_vis_landmarks(images, landmarks2d),
+            "landmarks2d": util.tensor_vis_landmarks(images, landmarks2d, lmks_gt),
             "shape_images": shape_images,
         }
         if self.cfg.model.use_tex:
@@ -216,8 +217,12 @@ class Solver(nn.Module):
                 opdict["uv_face_eye_mask"].expand(bsz, -1, -1, -1), opdict["grid"].detach(), align_corners=False
             )
             mask_face_eye = (mask_face_eye > 0.5).float()
+            mask_face = F.grid_sample(
+                opdict["uv_face_mask"].expand(bsz, -1, -1, -1), opdict["grid"].detach(), align_corners=False
+            )
+            mask_face = (mask_face > 0.5).float()
             # images
-            predicted_images = opdict["rendered_images"] * mask_face_eye * opdict["alpha_images"]
+            predicted_images = opdict["rendered_images"] * mask_face * opdict["alpha_images"]
             opdict["mask_face_eye"] = mask_face_eye
             opdict["predicted_images"] = predicted_images
 
@@ -238,13 +243,13 @@ class Solver(nn.Module):
 
         if self.cfg.loss.photo > 0.0:
             if masks is not None:
-                masks = masks[:, None, :, :]
+                masks = masks[:, None, :, :] * mask_face * opdict["alpha_images"]
             else:
                 masks = mask_face_eye * opdict["alpha_images"]
             losses["photometric_texture"] = (masks * (predicted_images - images).abs()).mean() * self.cfg.loss.photo
 
             mask_id = mask_face_eye * opdict["alpha_images"]
-            overlay = predicted_images * mask_id + images * (1 - mask_id)
+            overlay = opdict["rendered_images"] * mask_id + images * (1 - mask_id)
             opdict["overlay"] = overlay
 
         if self.cfg.loss.id > 0.0:

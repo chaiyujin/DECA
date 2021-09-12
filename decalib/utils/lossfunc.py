@@ -202,13 +202,18 @@ def weighted_landmark_loss(predicted_landmarks, landmarks_gt, weight=1.):
     # import ipdb; ipdb.set_trace()
     real_2d = landmarks_gt
     weights = torch.ones((68,)).cuda()
-    weights[5:7] = 2
-    weights[10:12] = 2
+    # weights[5:7] = 2
+    # weights[10:12] = 2
+    weights[:17] = 0.1
+    weights[5:7] = 1
+    weights[10:12] = 1
     # nose points
     weights[27:36] = 1.5
     weights[30] = 3
     weights[31] = 3
     weights[35] = 3
+    # eye
+    weights[36:48] = 0.1
     # inner mouth
     weights[60:68] = 5.0  # 1.5
     weights[48:60] = 5.0  # 1.5

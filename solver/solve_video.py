@@ -36,15 +36,21 @@ def solve_video(image_dir, lmks_toml, cfg, device):
     # build object
     cfg.model.param_list = ["exp", "pose", "cam", "transl"]
     cfg.loss.id = 0
-    cfg.loss.lmks = 4.0
+    cfg.loss.lmk = 1.0
+    cfg.loss.photo = 1.0
     cfg.loss.reg_shape = 0
-    cfg.loss.reg_exp = 1e-6
+    cfg.loss.reg_exp = 1e-4
 
     decoder = DECADecoder(cfg, device)
     solver = Solver(cfg, device)
 
+    faces = decoder.render.faces[0].detach().cpu().numpy()
+    uvcoords = decoder.render.raw_uvcoords[0].detach().cpu().numpy()
+    uvfaces = decoder.render.uvfaces[0].detach().cpu().numpy()
+
     export_dir = "TestSamples/obama/results/trn-000"
     os.makedirs(os.path.join(export_dir, "frames"), exist_ok=True)
+    os.makedirs(os.path.join(export_dir, "meshes"), exist_ok=True)
 
     shape = np.load("TestSamples/obama/results/identity/shape.npy")
     albedo = (cv2.imread("TestSamples/obama/results/identity/albedo.png")[..., [2, 1, 0]] / 255).astype(np.float32)
@@ -74,29 +80,31 @@ def solve_video(image_dir, lmks_toml, cfg, device):
 
         batch = dict(
             image=torch.tensor(img, device=device)[None, ...],
-            mask=torch.tensor(mask, device=device)[None, ...],
+            # mask=torch.tensor(mask, device=device)[None, ...],
+            mask=None,
             landmark=torch.tensor(lmks, device=device)[None, ...],
         )
 
-        n_iters = 300 if i_frame == 0 else 200
+        n_iters = 500 if i_frame == 0 else 200
         last_losses = dict(landmark=1000, photometric_texture=1000)
         delta_losses = {k: 0 for k in last_losses}
         lastcodes = {k: v.clone().detach() for k, v in codedict.items()}
         pbar_iters = tqdm(range(n_iters), desc="Iter", leave=False)
         for i_iter in pbar_iters:
             # decode codes
-            opdict, visdict = decoder.decode(codedict, batch["image"])
+            opdict, visdict = decoder.decode(codedict, batch["image"], batch["landmark"])
             # calculate loss and update outputs
             lossdict, opdict = solver.get_loss(batch, opdict, codedict)
             # smooth regs
             smth_reg_exp   = (torch.sum((codedict['exp']-lastcodes['exp'])**2)/2) * 1e-4
-            smth_reg_pose  = (torch.sum((codedict['pose']-lastcodes['pose'])**2)/2) * 0
-            smth_reg_cam   = (torch.sum((codedict['cam']-lastcodes['cam'])**2)/2) * 1e-2
-            smth_reg_trnsl = (torch.sum((codedict['transl']-lastcodes['transl'])**2)/2) * 1e-2
+            smth_reg_jaw   = (torch.sum((codedict['pose'][:, 3:6]-lastcodes['pose'][:, 3:6])**2)/2) * 1e-4
+            smth_reg_cam   = (torch.sum((codedict['cam']-lastcodes['cam'])**2)/2) * 0
+            smth_reg_trnsl = (torch.sum((codedict['transl']-lastcodes['transl'])**2)/2) * 0
+            smth_reg_pose  = (torch.sum((codedict['pose'][:, :3]-lastcodes['pose'][:, :3])**2)/2) * 0
 
             # vis
             if "predicted_images" in opdict:
-                visdict["predicted_images"] = opdict["predicted_images"] * batch['mask'][:, None, :, :]
+                visdict["predicted_images"] = opdict["predicted_images"]  # * batch['mask'][:, None, :, :]
             if "overlay" in opdict:
                 visdict["overlay"] = opdict["overlay"]
 
@@ -105,7 +113,7 @@ def solve_video(image_dir, lmks_toml, cfg, device):
                 delta_losses[k] = abs(float(last_losses[k] - lossdict[k]))
                 last_losses[k] = float(lossdict[k])
                 # print(f"{k}: {lossdict[k]:.6f}, {delta_losses[k]:.6f}")
-                if k == 'landmark' and (delta_losses[k] > 6e-4 or lossdict[k] > 0.025):
+                if k == 'landmark' and (delta_losses[k] >= 5e-6 or lossdict[k] > 0.0045):
                     convergence = False
                 elif k == 'photometric_texture' and (delta_losses[k] > 5e-4 or lossdict[k] > 0.015):
                     convergence = False
@@ -118,7 +126,7 @@ def solve_video(image_dir, lmks_toml, cfg, device):
 
             # backward
             if i_frame > 0:
-                loss = lossdict['all_loss'] + smth_reg_exp + smth_reg_pose + smth_reg_cam + smth_reg_trnsl
+                loss = lossdict['all_loss'] + smth_reg_exp + smth_reg_jaw + smth_reg_pose + smth_reg_cam + smth_reg_trnsl
             else:
                 loss = lossdict['all_loss']
             optim.zero_grad()
@@ -126,7 +134,8 @@ def solve_video(image_dir, lmks_toml, cfg, device):
             # optim step
             optim.step()
             # update learning rate
-            factor = np.clip(np.exp(-(i_iter - 100) / 100), 0.1, 1.0) if i_frame == 0 else 0.1
+            # factor = np.clip(np.exp(-(i_iter - 100) / 100), 0.1, 1.0) if i_frame == 0 else 0.1
+            factor = np.clip(np.exp(-(i_iter - 100) / 100), 0.1, 1.0)
             for group in optim.param_groups:
                 group["lr"] = lr * factor
 
@@ -143,10 +152,19 @@ def solve_video(image_dir, lmks_toml, cfg, device):
         # save results
         cv2.imwrite(os.path.join(export_dir, "frames", f"{i_frame}.png"), canvas)
         results_list.append({k: v.detach().cpu().numpy() for k, v in codedict.items()})
-        if i_frame == 100:
-            break
+
+        verts, _, _ = decoder.flame(
+            shape_params=codedict["shape"],
+            expression_params=codedict["exp"],
+            pose_params=torch.cat((torch.zeros_like(codedict["pose"][:, :3]), codedict["pose"][:, 3:6]), dim=1),
+        )
+        verts = verts[0].detach().cpu().numpy()
+        util.write_obj(f"{export_dir}/meshes/{i_frame}.obj", verts, faces, inverse_face_order=True)
+
+        # if i_frame == 100:
+        #     break
     
     for k in cfg.model.param_list:
         values = np.concatenate([x[k] for x in results_list])
-        print(k, values.shape)
         np.save(os.path.join(export_dir, f"{k}.npy"), values)
+        print(k, values.shape)
