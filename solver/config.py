@@ -35,4 +35,5 @@ def get_default_config():
     cfg.loss.reg_jaw_pose = 0.0  # 1.
     cfg.loss.use_gender_prior = False
     cfg.loss.shape_consistency = True
+    cfg.train.lr = 1e-2
     return cfg
